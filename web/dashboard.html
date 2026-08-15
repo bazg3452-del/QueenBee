@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TSecBench 调度引擎 · 监控</title>
+<style>
+:root{--bg:#0d1117;--panel:#161b22;--border:#30363d;--text:#e6edf3;--dim:#8b949e;
+      --green:#3fb950;--blue:#58a6ff;--red:#f85149;--orange:#d29922;--cyan:#39c5cf;--gray:#6e7681}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:"Segoe UI","Microsoft YaHei",sans-serif;padding:16px}
+h1{font-size:20px;margin-bottom:4px}
+.sub{color:var(--dim);font-size:12px;margin-bottom:12px}
+.chips{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+.chip{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:8px 14px;min-width:88px}
+.chip b{display:block;font-size:20px}
+.chip span{color:var(--dim);font-size:11px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(235px,1fr));gap:10px;margin-bottom:16px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px}
+.card .row1{display:flex;justify-content:space-between;align-items:center}
+.code{font-weight:600;font-size:15px}
+.badge{font-size:11px;padding:2px 8px;border-radius:10px;background:#21262d}
+.st-completed{border-left:3px solid var(--green)}
+.st-running{border-left:3px solid var(--blue)}
+.st-pending{border-left:3px solid var(--cyan)}
+.st-skipped{border-left:3px solid var(--gray)}
+.st-todo{border-left:3px solid var(--border)}
+.d-easy{color:var(--green)}.d-medium{color:var(--orange)}.d-hard{color:var(--red)}
+.bar{background:#21262d;height:6px;border-radius:3px;margin:8px 0}
+.bar i{display:block;height:100%;border-radius:3px;background:var(--blue)}
+.meta{font-size:11px;color:var(--dim);line-height:1.6}
+.panels{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:900px){.panels{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px;max-height:340px;overflow:auto}
+.panel h2{font-size:14px;margin-bottom:8px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--border)}
+.ev{font-size:12px;padding:3px 0;border-bottom:1px solid #21262d;font-family:Consolas,monospace}
+.ev .t{color:var(--dim)}
+.ev-complete{color:var(--green)}.ev-skip{color:var(--red)}.ev-hint{color:var(--orange)}
+.ev-spawn{color:var(--blue)}.ev-flag{color:var(--cyan)}.ev-give_up{color:var(--orange)}
+.pulse{animation:p 1.2s infinite}
+@keyframes p{0%,100%{opacity:1}50%{opacity:.45}}
+</style>
+</head>
+<body>
+<h1>TSecBench 调度引擎 · 本地监控</h1>
+<div class="sub" id="subline">等待引擎状态…</div>
+<div class="chips" id="chips"></div>
+<div class="grid" id="grid"></div>
+<div class="panels">
+  <div class="panel"><h2>Agent 进程</h2><div id="agents"></div></div>
+  <div class="panel"><h2>事件流</h2><div id="events"></div></div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const stLabel={completed:"通关",running:"解题中",pending:"启动中",skipped:"已跳过",todo:"待做"};
+const stColor={completed:"#3fb950",running:"#58a6ff",pending:"#39c5cf",skipped:"#6e7681",todo:"#8b949e"};
+let followEv=true;
+const evEl=$("events");
+evEl.addEventListener("scroll",()=>{followEv=evEl.scrollHeight-evEl.scrollTop-evEl.clientHeight<30});
+
+async function poll(){
+  try{
+    const r=await fetch("/api/state"); const s=await r.json(); render(s);
+  }catch(e){}
+  try{
+    const r=await fetch("/api/events"); const d=await r.json(); renderEvents(d.events||[]);
+  }catch(e){}
+}
+function render(s){
+  if(!s||!s.ts){
+    $("subline").textContent="等待引擎状态…（未检测到 engine_status.json，引擎可能未启动）";
+    return;
+  }
+  const c=s.counters||{};
+  const up=Math.floor(Date.now()/1000-s.ts);
+  $("subline").innerHTML=`模式: <b>${s.mode==="mock"?"mock 演示":"真实平台"}</b> · 状态更新于 ${new Date(s.ts*1000).toLocaleTimeString()}（${up}s 前）`;
+  $("chips").innerHTML=
+    chip(c.total,"题目总数")+chip(c.completed,"已通关","#3fb950")+chip(c.running,"运行中","#58a6ff")+
+    chip(c.skipped,"已跳过","#6e7681")+chip(c.est_score,"估算得分","#d29922");
+  $("grid").innerHTML=(s.challenges||[]).map(ch=>{
+    const fl=ch.correct_flag_count||0, tot=ch.flag_count||0;
+    const pct=tot?Math.round(fl/tot*100):0;
+    const cls=ch.status==="running"?' class="badge pulse"':' class="badge"';
+    return `<div class="card st-${ch.status}">
+      <div class="row1"><span class="code">${esc(ch.unique_code)}</span>
+        <span${cls} style="color:${stColor[ch.status]}">${stLabel[ch.status]||ch.status}</span></div>
+      <div class="meta"><span class="d-${ch.difficulty}">${esc(ch.difficulty)}</span> · ${ch.total_score} 分${ch.spawns?` · 派发×${ch.spawns}`:""}</div>
+      <div class="bar"><i style="width:${pct}%"></i></div>
+      <div class="meta">flag ${fl}/${tot} · 容器 ${esc(ch.container_status)}${ch.addr&&ch.addr.length?` · ${esc(ch.addr.join(","))}`:""}${ch.skip_reason?` · <span style="color:#f85149">${esc(ch.skip_reason)}</span>`:""}</div>
+    </div>`;}).join("")||"<div style='color:#8b949e;font-size:12px'>无题目数据</div>";
+  const rows=(s.agents||[]).map(a=>{
+    const el=Math.floor(Date.now()/1000-a.started_at);
+    return `<tr><td>${esc(a.agent_id.slice(-18))}</td><td>${esc(a.challenge_id)}</td>
+      <td>第${a.attempt_no}次</td><td style="color:${a.status==="running"?"#3fb950":"#8b949e"}">${a.status}</td>
+      <td>${fmtDur(el)}</td></tr>`;}).join("");
+  $("agents").innerHTML=rows
+    ?`<table><tr><th>agent</th><th>题目</th><th>尝试</th><th>状态</th><th>已运行</th></tr>${rows}</table>`
+    :"<div style='color:#8b949e;font-size:12px'>当前无 agent 进程</div>";
+}
+function chip(v,label,color){return `<div class="chip"><b style="color:${color||"#e6edf3"}">${v??0}</b><span>${label}</span></div>`;}
+function fmtDur(s){const m=Math.floor(s/60);return m>0?`${m}m${s%60}s`:`${s}s`;}
+function renderEvents(evs){
+  if(!evs.length)return;
+  const html=evs.map(e=>{
+    const t=new Date(e.ts*1000).toLocaleTimeString();
+    return `<div class="ev ev-${e.type}"><span class="t">[${t}]</span> ${esc(e.msg)}</div>`;
+  }).join("");
+  $("events").innerHTML=html;
+  if(followEv)evEl.scrollTop=evEl.scrollHeight;
+}
+poll();setInterval(poll,2000);
+</script>
+</body>
+</html>
