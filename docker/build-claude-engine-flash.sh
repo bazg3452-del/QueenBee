@@ -1,19 +1,18 @@
 #!/bin/bash
-# build-claude-engine.sh - 引擎版镜像构建（run+commit 逐层构建 v1）
-# 与 build-claude-run.sh 相同的环境搭建流程（阿里源/代理/17 工具/claude-code），
-# 模型走百度网关 glm-5.2-agent-chanllenge；入口换成智能调度引擎（engine-entrypoint.sh -> python3 scheduler_engine.py），
-# 并多拷入引擎代码（engine/、agent_prompts/）。不修改原脚本，独立使用。
-# 产物：agent-engine.tar.gz
+# build-claude-engine-flash.sh - 引擎版镜像构建（flash 模型版）
+# 与 build-claude-engine.sh 完全相同，仅模型配置换成 flash（deepseek-v4-flash[1m]），
+# 产物独立命名。包含两道硬校验（[2/8] 工具链 + [7.5/8] 镜像自检）。
+# 产物：agent-engine-flash-v1.tar.gz
 set -e
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DOCKER_DIR="$ROOT/docker"
-CNAME=tsecbench-engine-build
-IMG=tsecbench-agent-engine-deepseek-v5:latest
-OUT="$ROOT/agent-engine-deepseek-v5.tar.gz"
+CNAME=tsecbench-engine-flash-build
+IMG=tsecbench-agent-engine-flash-v1:latest
+OUT="$ROOT/agent-engine-flash-v1.tar.gz"
 PROXY_ENV="-e HTTP_PROXY=http://http.docker.internal:3128 -e HTTPS_PROXY=http://http.docker.internal:3128 -e NO_PROXY=localhost,127.0.0.1"
 
-echo "===== 引擎版镜像逐层构建（run+commit，exec 注入代理）====="
+echo "===== 引擎版镜像逐层构建（flash 模型，run+commit，exec 注入代理）====="
 
 docker rm -f $CNAME 2>/dev/null || true
 echo "[1/8] 启动基础容器..."
@@ -30,7 +29,8 @@ pip3 install --break-system-packages dirsearch
 rm -rf /var/lib/apt/lists/*
 echo APT_DONE
 "
-docker exec $CNAME bash -c "python3 --version && curl --version | head -1"   || { echo "!!! [2/8] 工具链校验失败：python3/curl 缺失"; docker rm -f $CNAME >/dev/null; exit 1; }
+docker exec $CNAME bash -c "python3 --version && curl --version | head -1" \
+  || { echo "!!! [2/8] 工具链校验失败：python3/curl 缺失"; docker rm -f $CNAME >/dev/null; exit 1; }
 
 echo "[3/8] npm 装 claude-code..."
 docker exec $PROXY_ENV $CNAME bash -c "npm install -g @anthropic-ai/claude-code && echo NPM_DONE"
@@ -42,7 +42,7 @@ mkdir -p /home/agent/.claude /workspace/.opencode
 "
 
 echo "[5/8] 复制配置/技能库/引擎代码/工具..."
-docker cp "$DOCKER_DIR/claude-settings-pro.json" $CNAME:/home/agent/.claude/settings.json
+docker cp "$DOCKER_DIR/claude-settings.json" $CNAME:/home/agent/.claude/settings.json
 docker cp "$DOCKER_DIR/skills-all" $CNAME:/home/agent/.claude/skills
 docker cp "$ROOT/pwnkit" $CNAME:/workspace/.opencode/
 docker cp "$ROOT/scheduler_engine.py" $CNAME:/workspace/scheduler_engine.py
@@ -66,7 +66,9 @@ docker commit \
 docker rm -f $CNAME >/dev/null
 
 echo "[7.5/8] 镜像自检（python3/curl/claude 必须存在）..."
-MSYS_NO_PATHCONV=1 docker run --rm --entrypoint bash $IMG -c   "which python3 curl claude" | grep -q python3   || { echo "!!! 镜像自检失败：缺少 python3/curl/claude"; exit 1; }
+MSYS_NO_PATHCONV=1 docker run --rm --entrypoint bash $IMG -c \
+  "which python3 curl claude" | grep -q python3 \
+  || { echo "!!! 镜像自检失败：缺少 python3/curl/claude"; exit 1; }
 
 echo "[8/8] 导出 tar.gz..."
 docker save $IMG | gzip > "$OUT"

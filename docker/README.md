@@ -1,10 +1,11 @@
 # QueenBee Docker 构建
 
-本目录提供 QueenBee v2 的托管模式镜像构建脚本（参考版）。
+本目录提供 QueenBee 的托管模式镜像构建脚本。
 
 ## 文件
 
-- `build-claude-engine.sh` — run+commit 逐层构建脚本（阿里源/代理/17 工具/claude-code + 引擎代码）
+- `build-claude-engine.sh` — pro 版（deepseek-v4-pro[1m]），含工具链与镜像双重硬校验
+- `build-claude-engine-flash.sh` — flash 版（deepseek-v4-flash[1m]），其余一致
 - `claude-settings-pro.json` — 容器内 Claude Code 配置（DeepSeek 网关 + bypassPermissions）
 
 ## 构建前置依赖（来自私有项目 blackboard-agent）

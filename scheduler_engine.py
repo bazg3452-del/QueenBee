@@ -80,7 +80,8 @@ class QueenBee:
     def meta_of(self, cid):
         m = self.meta.setdefault(cid, {
             "first_start": None, "hint_at": None, "progress_seen": None,
-            "correct_snapshot": 0, "spawns": 0, "pending_deadline": None, "addr": [],
+            "correct_snapshot": 0, "spawns": 0, "stops": 0,
+            "pending_deadline": None, "addr": [],
         })
         if m["progress_seen"] is None:
             m["progress_seen"] = time.time()
@@ -105,10 +106,10 @@ class QueenBee:
                 log.critical("缺少环境变量: %s", ",".join(missing))
                 return 2
         os.makedirs(self.cfg.logs_dir, exist_ok=True)
-        log.info("QueenBee v2 启动 mock=%s slots=%d poll=%ds 漏斗[看提示 easy=%ds/med=%ds/hard=%ds/multi=%ds 二次解题后 单=%ds/多=%ds 兜底余量=%ds]",
+        log.info("QueenBee v2 启动 mock=%s slots=%d poll=%ds 漏斗[看提示 easy=%ds/med=%ds/hard=%ds/multi=%ds 二次解题后 单=%ds/多=%ds 兜底=看提示+二次解题]",
                  self.cfg.mock, self.cfg.max_slots, self.cfg.poll_interval,
                  self.cfg.t20_easy, self.cfg.t20, self.cfg.t20_hard, self.cfg.t20_multi,
-                 self.cfg.t30, self.cfg.t30_multi, self.cfg.t40)
+                 self.cfg.t30, self.cfg.t30_multi)
 
         # 健康检查（带 token 的 list，失败退避 5 次 × 5s）
         for i in range(5):
@@ -243,7 +244,7 @@ class QueenBee:
             t_hint = {"easy": self.cfg.t20_easy, "medium": self.cfg.t20,
                       "hard": self.cfg.t20_hard}.get(diff, self.cfg.t20)
             t_post = self.cfg.t30
-        t_abs = t_hint + t_post + self.cfg.t40
+        t_abs = t_hint + t_post
         return t_hint, t_post, t_abs
 
     def check_timeouts(self, now):
@@ -386,7 +387,8 @@ class QueenBee:
         else:
             aid = self.agents.spawn_agent(c, addr, attempt, intel)
         self.started_once = True
-        self._spawn_secondary(c, addr)
+        if not self.agents.running_for(cid, role="scout"):
+            self._spawn_secondary(c, addr)
         self.bb.update_progress(cid, spawns=attempt, addr=list(addr),
                                 first_start=m["first_start"])
         log.info("▶ spawn %s attempt=%d → %s addr=%s", aid, attempt, cid, ",".join(addr))
@@ -429,6 +431,24 @@ class QueenBee:
         return "\n".join(parts) if parts else ""
 
     # ================= 事件回调 =================
+    def _fresh_challenge(self, cid):
+        """换人前同步查一次平台：返回该题最新状态；失败返回 None。"""
+        try:
+            chs = self.adapter.list_challenges()
+        except AdapterError:
+            return None
+        if self.cfg.only:
+            chs = [c for c in chs if c["unique_code"] in self.cfg.only]
+        self.challenges = chs
+        for c in chs:
+            if c["unique_code"] == cid:
+                return c
+        return None
+
+    def _is_done(self, c):
+        return bool(c.get("is_completed") or (
+            c.get("flag_count", 0) > 0 and c.get("correct_flag_count", 0) >= c.get("flag_count", 0)))
+
     def on_agent_died(self, aid):
         a = self.agents.registry.get(aid)
         if not a:
@@ -437,30 +457,57 @@ class QueenBee:
         c = self._find(cid)
         if c is None or c.get("is_completed"):
             return
+        # 换人/补位前先同步查平台：题可能刚被自己解完，别再白派 agent
+        fresh = self._fresh_challenge(cid)
+        if fresh is not None and self._is_done(fresh):
+            if cid not in self.completed:
+                self.completed.add(cid)
+                self.on_complete(fresh)
+            return
+        m = self.meta_of(cid)
+        if fresh is not None and fresh.get("correct_flag_count", 0) > m["correct_snapshot"]:
+            # 平台有新 flag = 实质进展：更新基准，重置无进展计时
+            m["correct_snapshot"] = fresh["correct_flag_count"]
+            m["progress_seen"] = time.time()
         if a.get("role") == "scout":
             # 第二解题者自然退出 -> 立即补位（不受漏斗影响）
             self._spawn_secondary(c, a.get("container_addr") or [])
             return
-        if self.agents.running_for(cid):
-            return  # 双线还有其他 agent
-        m = self.meta_of(cid)
+        # worker 自然退出 = 一次停止：第 1 次换人（scout 不受影响），第 2 次整题收工
+        m["stops"] = m.get("stops", 0) + 1
+        if m["stops"] >= 2:
+            self._skip(cid, "worker 第二次停止，整题收工")
+            return
         if m.get("spawns", 0) >= self.cfg.max_attempts:
             self._skip(cid, "重试超限（自然退出）")
-        else:
-            self._spawn_for(c, c.get("container_addr") or a.get("container_addr") or [])
+            return
+        self._spawn_for(c, c.get("container_addr") or a.get("container_addr") or [])
 
     def on_agent_give_up(self, cid):
-        log.info("⚑ %s 的 agent 写了 GIVE_UP，提前处置（kill + 二次解题）", cid)
-        self._event("give_up", f"{cid} 的 agent 主动放弃")
-        self.agents.kill_all_for(cid, "GIVE_UP")
+        log.info("⚑ %s 的 worker 写了 GIVE_UP，提前处置", cid)
+        self._event("give_up", f"{cid} 的 worker 主动放弃")
+        # 第一次停止：只杀该题 worker（scout 继续陪跑）
+        for aid in [x for x, a in self.agents.registry.items()
+                    if a["challenge_id"] == cid and a.get("role") != "scout"]:
+            self.agents.kill_agent(aid, "GIVE_UP")
         c = self._find(cid)
         if c is None or c.get("is_completed"):
             return
         m = self.meta_of(cid)
+        fresh = self._fresh_challenge(cid)
+        if fresh is not None and self._is_done(fresh):
+            if cid not in self.completed:
+                self.completed.add(cid)
+                self.on_complete(fresh)
+            return
+        m["stops"] = m.get("stops", 0) + 1
+        if m["stops"] >= 2:
+            self._skip(cid, "worker 第二次停止（GIVE_UP），整题收工")
+            return
         if m.get("spawns", 0) >= self.cfg.max_attempts:
             self._skip(cid, "重试超限（GIVE_UP）")
-        else:
-            self._spawn_for(c, c.get("container_addr") or m.get("addr", []))
+            return
+        self._spawn_for(c, c.get("container_addr") or m.get("addr", []))
 
     def on_mock_flag_submitted(self, cid, flag):
         """mock 模式：watcher 扫到 SUBMITTED_FLAG，模拟 agent 已 curl 提交。"""
@@ -653,14 +700,14 @@ def main():
     p = argparse.ArgumentParser(description="TSecBench 智能调度引擎")
     p.add_argument("--mock", action="store_true", help="本地演示模式（假平台+假agent，不联网不扣分）")
     p.add_argument("--slots", type=int, default=3, help="并发槽位（默认 3）")
-    p.add_argument("--t20", type=int, default=1200, help="看提示阈值: medium（秒，默认 1200）")
-    p.add_argument("--t20-easy", type=int, default=600, help="看提示阈值: easy（秒，默认 600）")
-    p.add_argument("--t20-hard", type=int, default=1800, help="看提示阈值: hard（秒，默认 1800）")
-    p.add_argument("--t20-multi", type=int, default=2400, help="看提示阈值: 多flag（秒，默认 2400）")
+    p.add_argument("--t20", type=int, default=1800, help="看提示阈值: medium（秒，默认 1800）")
+    p.add_argument("--t20-easy", type=int, default=900, help="看提示阈值: easy（秒，默认 900）")
+    p.add_argument("--t20-hard", type=int, default=2400, help="看提示阈值: hard（秒，默认 2400）")
+    p.add_argument("--t20-multi", type=int, default=3000, help="看提示阈值: 多flag（秒，默认 3000）")
     p.add_argument("--t30", type=int, default=1800, help="二次解题后强制停止: 单flag（秒，默认 1800）")
     p.add_argument("--t30-multi", type=int, default=2400, help="二次解题后强制停止: 多flag（秒，默认 2400）")
     p.add_argument("--t40", type=int, default=600, help="绝对兜底余量（秒，默认 600）")
-    p.add_argument("--poll", type=int, default=60, help="通关检测轮询间隔（秒，默认 60）")
+    p.add_argument("--poll", type=int, default=10, help="通关检测轮询间隔（秒，默认 10）")
     p.add_argument("--tick", type=int, default=5, help="黑板监视间隔（秒，默认 5）")
     p.add_argument("--start-wait", type=int, default=120, help="start 后等就绪超时（秒，默认 120）")
     p.add_argument("--bb", default=None, help="黑板目录（默认 <项目>/blackboard）")
