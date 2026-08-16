@@ -8,8 +8,8 @@ set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DOCKER_DIR="$ROOT/docker"
 CNAME=tsecbench-engine-flash-build
-IMG=tsecbench-agent-engine-flash-v1:latest
-OUT="$ROOT/agent-engine-flash-v1.tar.gz"
+IMG=tsecbench-agent-engine-flash-v2:latest
+OUT="$ROOT/agent-engine-flash-v2.tar.gz"
 PROXY_ENV="-e HTTP_PROXY=http://http.docker.internal:3128 -e HTTPS_PROXY=http://http.docker.internal:3128 -e NO_PROXY=localhost,127.0.0.1"
 
 echo "===== 引擎版镜像逐层构建（flash 模型，run+commit，exec 注入代理）====="

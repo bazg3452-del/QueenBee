@@ -9,8 +9,8 @@ set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DOCKER_DIR="$ROOT/docker"
 CNAME=tsecbench-engine-build
-IMG=tsecbench-agent-engine-deepseek-v5:latest
-OUT="$ROOT/agent-engine-deepseek-v5.tar.gz"
+IMG=tsecbench-agent-engine-deepseek-v7:latest
+OUT="$ROOT/agent-engine-deepseek-v7.tar.gz"
 PROXY_ENV="-e HTTP_PROXY=http://http.docker.internal:3128 -e HTTPS_PROXY=http://http.docker.internal:3128 -e NO_PROXY=localhost,127.0.0.1"
 
 echo "===== 引擎版镜像逐层构建（run+commit，exec 注入代理）====="

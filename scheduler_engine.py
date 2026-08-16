@@ -106,10 +106,12 @@ class QueenBee:
                 log.critical("缺少环境变量: %s", ",".join(missing))
                 return 2
         os.makedirs(self.cfg.logs_dir, exist_ok=True)
-        log.info("QueenBee v2 启动 mock=%s slots=%d poll=%ds 漏斗[看提示 easy=%ds/med=%ds/hard=%ds/multi=%ds 二次解题后 单=%ds/多=%ds 兜底=看提示+二次解题]",
+        log.info("QueenBee v2 启动 mock=%s slots=%d poll=%ds 漏斗[看提示 easy=%ds/med=%ds/hard=%ds 多flag[e=%ds/m=%ds/h=%ds] 二次解题后 easy=%ds/med=%ds/hard=%ds 多flag[e=%ds/m=%ds/h=%ds] 兜底=看提示+二次解题]",
                  self.cfg.mock, self.cfg.max_slots, self.cfg.poll_interval,
-                 self.cfg.t20_easy, self.cfg.t20, self.cfg.t20_hard, self.cfg.t20_multi,
-                 self.cfg.t30, self.cfg.t30_multi)
+                 self.cfg.t20_easy, self.cfg.t20, self.cfg.t20_hard,
+                 self.cfg.t20_multi_easy, self.cfg.t20_multi_medium, self.cfg.t20_multi_hard,
+                 self.cfg.t30_easy, self.cfg.t30, self.cfg.t30_hard,
+                 self.cfg.t30_multi_easy, self.cfg.t30_multi_medium, self.cfg.t30_multi_hard)
 
         # 健康检查（带 token 的 list，失败退避 5 次 × 5s）
         for i in range(5):
@@ -231,19 +233,22 @@ class QueenBee:
     # ================= 超时漏斗 =================
     def _funnel(self, cid):
         """返回 (看提示阈值, 二次解题后强制停止期限, 绝对兜底上限)。按难度/flag 数定制：
-        看提示: easy 10min / medium 20min / hard 30min / 多flag 40min（不分难度）
-        二次解题后强制停止: 单flag 30min / 多flag 40min
-        绝对兜底 = 看提示 + 二次解题期限 + 余量"""
+        看提示: easy 10/med 20/hard 30；多flag: easy 30/med 40/hard 50（分钟）
+        二次解题后强制停止: easy 15/med 20/hard 25；多flag: easy 20/med 35/hard 40
+        绝对兜底 = 看提示 + 二次解题期限"""
         c = self._find(cid)
         diff = (c or {}).get("difficulty", "medium")
         multi = (c or {}).get("flag_count", 1) > 1
         if multi:
-            t_hint = self.cfg.t20_multi
-            t_post = self.cfg.t30_multi
+            t_hint = {"easy": self.cfg.t20_multi_easy, "medium": self.cfg.t20_multi_medium,
+                      "hard": self.cfg.t20_multi_hard}.get(diff, self.cfg.t20_multi_hard)
+            t_post = {"easy": self.cfg.t30_multi_easy, "medium": self.cfg.t30_multi_medium,
+                      "hard": self.cfg.t30_multi_hard}.get(diff, self.cfg.t30_multi_hard)
         else:
             t_hint = {"easy": self.cfg.t20_easy, "medium": self.cfg.t20,
                       "hard": self.cfg.t20_hard}.get(diff, self.cfg.t20)
-            t_post = self.cfg.t30
+            t_post = {"easy": self.cfg.t30_easy, "medium": self.cfg.t30,
+                      "hard": self.cfg.t30_hard}.get(diff, self.cfg.t30)
         t_abs = t_hint + t_post
         return t_hint, t_post, t_abs
 
@@ -700,12 +705,18 @@ def main():
     p = argparse.ArgumentParser(description="TSecBench 智能调度引擎")
     p.add_argument("--mock", action="store_true", help="本地演示模式（假平台+假agent，不联网不扣分）")
     p.add_argument("--slots", type=int, default=3, help="并发槽位（默认 3）")
-    p.add_argument("--t20", type=int, default=1800, help="看提示阈值: medium（秒，默认 1800）")
-    p.add_argument("--t20-easy", type=int, default=900, help="看提示阈值: easy（秒，默认 900）")
-    p.add_argument("--t20-hard", type=int, default=2400, help="看提示阈值: hard（秒，默认 2400）")
-    p.add_argument("--t20-multi", type=int, default=3000, help="看提示阈值: 多flag（秒，默认 3000）")
-    p.add_argument("--t30", type=int, default=1800, help="二次解题后强制停止: 单flag（秒，默认 1800）")
-    p.add_argument("--t30-multi", type=int, default=2400, help="二次解题后强制停止: 多flag（秒，默认 2400）")
+    p.add_argument("--t20", type=int, default=1200, help="看提示阈值: medium（秒，默认 1200）")
+    p.add_argument("--t20-easy", type=int, default=600, help="看提示阈值: easy（秒，默认 600）")
+    p.add_argument("--t20-hard", type=int, default=1800, help="看提示阈值: hard（秒，默认 1800）")
+    p.add_argument("--t20-multi-easy", type=int, default=1800, help="看提示阈值: 多flag+easy（秒，默认 1800）")
+    p.add_argument("--t20-multi-medium", type=int, default=2400, help="看提示阈值: 多flag+medium（秒，默认 2400）")
+    p.add_argument("--t20-multi-hard", type=int, default=3000, help="看提示阈值: 多flag+hard（秒，默认 3000）")
+    p.add_argument("--t30", type=int, default=1200, help="二次解题后强制停止: medium（秒，默认 1200）")
+    p.add_argument("--t30-hard", type=int, default=1500, help="二次解题后强制停止: hard（秒，默认 1500）")
+    p.add_argument("--t30-easy", type=int, default=900, help="二次解题后强制停止: easy（秒，默认 900）")
+    p.add_argument("--t30-multi-easy", type=int, default=1200, help="二次解题后强制停止: 多flag+easy（秒，默认 1200）")
+    p.add_argument("--t30-multi-medium", type=int, default=2100, help="二次解题后强制停止: 多flag+medium（秒，默认 2100）")
+    p.add_argument("--t30-multi-hard", type=int, default=2400, help="二次解题后强制停止: 多flag+hard（秒，默认 2400）")
     p.add_argument("--t40", type=int, default=600, help="绝对兜底余量（秒，默认 600）")
     p.add_argument("--poll", type=int, default=10, help="通关检测轮询间隔（秒，默认 10）")
     p.add_argument("--tick", type=int, default=5, help="黑板监视间隔（秒，默认 5）")
@@ -719,7 +730,10 @@ def main():
                  poll=args.poll, watcher_tick=args.tick, slots=args.slots,
                  start_wait=args.start_wait, bb_dir=args.bb, only=only,
                  t20_easy=args.t20_easy, t20_hard=args.t20_hard,
-                 t20_multi=args.t20_multi, t30_multi=args.t30_multi)
+                 t30_easy=args.t30_easy, t30_hard=args.t30_hard,
+                 t20_multi_easy=args.t20_multi_easy, t20_multi_medium=args.t20_multi_medium,
+                 t20_multi_hard=args.t20_multi_hard, t30_multi_easy=args.t30_multi_easy,
+                 t30_multi_medium=args.t30_multi_medium, t30_multi_hard=args.t30_multi_hard)
 
     # Windows 控制台 UTF-8（git-bash 下避免中文乱码）
     if os.name == "nt":

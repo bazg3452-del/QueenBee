@@ -4,10 +4,12 @@ import os
 
 
 class Config:
-    def __init__(self, mock=False, t20=1800, t30=1800, t40=600,
+    def __init__(self, mock=False, t20=1200, t30=1200, t40=600,
                  poll=10, watcher_tick=5, slots=3, start_wait=120,
-                 bb_dir=None, logs_dir=None, only=None, t20_easy=900,
-                 t20_hard=2400, t20_multi=3000, t30_multi=2400):
+                 bb_dir=None, logs_dir=None, only=None, t20_easy=600,
+                 t20_hard=1800, t30_easy=900, t30_hard=1500,
+                 t20_multi_easy=1800, t20_multi_medium=2400, t20_multi_hard=3000,
+                 t30_multi_easy=1200, t30_multi_medium=2100, t30_multi_hard=2400):
         self.mock = mock
         # 平台凭证（真实模式必需；mock 模式不需要）
         self.token = os.environ.get("BENCHMARK_TOKEN", "")
@@ -18,12 +20,18 @@ class Config:
         self.logs_dir = logs_dir or os.path.join(self.root, "agent_logs")
         self.prompts_dir = os.path.join(self.root, "agent_prompts")
         # 时间参数（秒）
-        self.t20 = t20                        # 看提示阈值（无进展）：medium 默认 1200s
-        self.t20_easy = t20_easy              # easy 看提示阈值 600s（10min）
-        self.t20_hard = t20_hard              # hard 看提示阈值 1800s（30min）
-        self.t20_multi = t20_multi            # 多 flag 题看提示阈值 2400s（40min，不分难度）
-        self.t30 = t30                        # 二次解题后强制停止：单 flag 1800s（30min）
-        self.t30_multi = t30_multi            # 二次解题后强制停止：多 flag 2400s（40min）
+        self.t20 = t20                        # 看提示阈值：medium 1200s（20min）
+        self.t20_easy = t20_easy              # 看提示阈值：easy 600s（10min）
+        self.t20_hard = t20_hard              # 看提示阈值：hard 1800s（30min）
+        self.t20_multi_easy = t20_multi_easy    # 看提示阈值：多flag+easy 1800s（30min）
+        self.t20_multi_medium = t20_multi_medium  # 看提示阈值：多flag+medium 2400s（40min）
+        self.t20_multi_hard = t20_multi_hard    # 看提示阈值：多flag+hard 3000s（50min）
+        self.t30 = t30                        # 二次解题后强制停止：medium 1200s（20min）
+        self.t30_hard = t30_hard              # 二次解题后强制停止：hard 1500s（25min）
+        self.t30_easy = t30_easy              # 二次解题后强制停止：easy 900s（15min）
+        self.t30_multi_easy = t30_multi_easy    # 二次解题后强制停止：多flag+easy 1200s（20min）
+        self.t30_multi_medium = t30_multi_medium  # 二次解题后强制停止：多flag+medium 2100s（35min）
+        self.t30_multi_hard = t30_multi_hard    # 二次解题后强制停止：多flag+hard 2400s（40min）
         self.t40 = t40                        # 保留兼容（兜底 = 看提示阈值 + 二次解题期限）
         self.poll_interval = poll             # 通关检测轮询间隔
         self.watcher_tick = watcher_tick      # 黑板监视间隔
