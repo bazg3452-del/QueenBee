@@ -1,72 +1,88 @@
-# QueenBee · TSecBench 智能调度引擎 v2
+# QueenBee
 
-以 Docker 镜像形式部署到 TSecBench 平台的自动跑分调度引擎。
+面向攻防评测场景的多 agent 调度引擎，以 Docker 镜像交付，容器启动后自主完成评测全流程。
 
-**代号 QueenBee（蜂后）**：蜂后只调度不下场；工蜂（worker）按 Skill 方法论采蜜、斥候蜂（scout）自由探路只读蜂巢；蜜（flag）入蜂巢（黑板）。引擎管容器、管进程、管黑板、管定时器、管通关检测；解题完全交给 one-shot Claude agent，agent 自己 curl 提交 flag，引擎轮询平台检测通关后 kill + close 换题。
+引擎不参与解题。解题由独立运行的 Claude Code 进程完成；引擎负责容器生命周期、agent 派发与回收、超时控制与情报交接。
+
+## 设计原则
+
+1. **编排优先**：复用成熟的 agent 工具与技能库，不重复实现解题能力；引擎只做确定性调度。
+2. **双 agent 并行**：每道题运行两名 agent。worker 加载技能库、按既有方法论推进；scout 不施加约束，独立发挥，对黑板只读。
+3. **状态外置**：agent 的中间成果全部写入黑板（文件系统），更换 agent 时上下文经黑板摘要交接，不损失信息。
+4. **代码级确定性**：超时、换人、收尾等策略由引擎代码执行，不依赖模型自觉。
 
 ## 架构
 
 ```
-scheduler_engine.py      ← 入口 + 主循环
+scheduler_engine.py      # 入口 + 主循环
 engine/
-├── config.py            环境变量 + 时间参数
-├── tsec_adapter.py      平台 API（纯标准库 urllib + 错误码映射）
-├── mock_adapter.py      假平台（--mock 演示用）
-├── agent_manager.py     spawn/kill one-shot claude -p 子进程
-├── blackboard.py        黑板（每题独立目录）读写 + 活动度
-├── watcher.py           黑板监视（活动度 / GIVE_UP / mock 提交扫描）
-└── scheduler.py         纯策略：选题排序、同网段判断
-mock_agent/mock_agent.py 模拟解题 agent（--mock 演示用）
-agent_prompts/default.md agent 提示词模板（引擎填充变量）
-tests/                   单元测试（标准库 unittest，32 个用例）
-blackboard/              黑板（运行时生成，每题一个目录）
-agent_logs/              agent 进程日志（运行时生成）
+├── config.py            # 环境变量与时间参数
+├── tsec_adapter.py      # 平台 API（urllib，错误码分类与退避重试）
+├── mock_adapter.py      # 本地演示用假平台
+├── agent_manager.py     # agent 进程管理（spawn/kill，POSIX 进程组回收）
+├── blackboard.py        # 题级黑板读写与活动度统计
+├── watcher.py           # 黑板监视（活动度 / GIVE_UP / 提交事件）
+└── scheduler.py         # 选题排序与同网段判断
+agent_prompts/
+├── default.md           # worker 模板（技能约束）
+└── default2.md          # scout 模板（零约束，只读黑板）
+monitor.py + web/        # 本地监控面板（:8000）
+mock_agent/              # 本地演示用剧本 agent
+tests/                   # 单元测试（32 项）
+docker/                  # 镜像构建脚本（pro / flash）
 ```
 
-## 设计要点（与方案 v3.2 对应）
+## 核心机制
 
-- **agent 只写黑板**（facts.md / recon.json），不读任何文件；所有"读"发生在 spawn 时刻（引擎把黑板摘要附进 prompt）
-- **agent 自己 curl 提交 flag**（命令内嵌 prompt，真实 URL/token 已填充），不经过引擎
-- **通关检测 = 轮询 list**：flag 全齐 → kill 该题全部 agent；容器还活着则 close
-- **超时漏斗**：20min 无活动 → 拉 hint（扣分）+ 双线新 agent；30min（带 hint 后）无新 flag → skip；40min 强制 skip
-- **二次解题**：agent 自然退出/GIVE_UP → 用最新黑板内容重新 spawn（每题最多 3 次）
-- **尾声补题**：槽位空且无未开始题 → 从 skip 清单挑 facts 最丰富的题补做一次
-- **零第三方依赖**：纯 Python 标准库
+- **双 agent 与停止计数**：worker 第一次停止（自然退出或主动放弃）换人，scout 不受影响；worker 第二次停止则整题放弃，回收全部 agent 与容器。
+- **换人前查平台**：agent 退出后先同步查询平台状态，已通关则直接回收，不再派发多余 agent。
+- **通关检测**：每 10 秒轮询平台，flag 集齐即回收该题全部进程并关闭容器，补位下一题。
+- **难度感知超时漏斗**：
+
+| 题目 | 无进展触发提示与二次解题 | 二次解题后仍未产出则放弃 | 兜底（前两项之和） |
+|------|------------------------|------------------------|-------------------|
+| easy | 15 分钟 | 30 分钟 | 45 分钟 |
+| medium | 30 分钟 | 30 分钟 | 60 分钟 |
+| hard | 40 分钟 | 30 分钟 | 70 分钟 |
+| 多 flag | 50 分钟 | 40 分钟 | 90 分钟 |
+
+- **情报共享**：同网段题目的侦察结果与发现摘要并入新 agent 的提示词。
+- **尾声补题**：所有题目处理完后，从跳过清单按黑板情报量挑一道补做，每题一次。
 
 ## 快速开始
 
-### 本地演示（--mock：假平台 + 假 agent，不联网、不扣分）
+本地演示（假平台 + 剧本 agent，不联网）：
 
 ```bash
-# 压缩时间参数，几十秒看完完整流程：
-# 通关 / 提示双线 / GIVE_UP 二次解题 / skip / 尾声补题
-python scheduler_engine.py --mock --slots 2 --poll 2 --tick 1 --t20 8 --t30 8 --t40 25
+python scheduler_engine.py --mock --slots 2 --poll 2 --tick 1 --t20 8 --t30 8
 ```
 
-### 真实模式（容器内，平台注入环境变量）
+真实模式（平台注入环境变量 BENCHMARK_TOKEN / BENCHMARK_BASE_URL）：
 
 ```bash
-# 需要环境变量（平台托管模式自动注入）：
-#   BENCHMARK_TOKEN / BENCHMARK_BASE_URL（平台）
-#   ANTHROPIC_AUTH_TOKEN（claude 子进程继承）
 python scheduler_engine.py
 ```
 
-真实模式下会：健康检查（带 token 的 list）→ 读题目列表 → 按 easy→hard、低分→高分排序 → 3 槽位并发调度。
+监控面板：
+
+```bash
+python monitor.py            # 浏览器打开 http://127.0.0.1:8000
+```
 
 ### 命令行参数
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
 | `--mock` | 关 | 本地演示模式 |
-| `--slots` | 3 | 并发槽位（平台上限 3） |
-| `--t20` | 1200 | 20min 检查点（秒） |
-| `--t30` | 1800 | 30min 终局（秒） |
-| `--t40` | 2400 | 40min 强制终止（秒） |
+| `--slots` | 3 | 并发槽位 |
 | `--poll` | 10 | 通关检测轮询间隔（秒） |
 | `--tick` | 5 | 黑板监视间隔（秒） |
-| `--start-wait` | 120 | start 后等容器就绪超时（秒） |
+| `--t20-easy` / `--t20` / `--t20-hard` / `--t20-multi` | 900 / 1800 / 2400 / 3000 | 各档看提示阈值（秒） |
+| `--t30` / `--t30-multi` | 1800 / 2400 | 二次解题期限（秒） |
+| `--t40` | 600 | 兼容保留 |
+| `--only` | 无 | 只解指定题目（逗号分隔） |
 | `--bb` | 项目下 blackboard/ | 黑板目录 |
+| `--start-wait` | 120 | 容器就绪等待上限（秒） |
 
 ## 测试
 
@@ -74,21 +90,19 @@ python scheduler_engine.py
 python -m unittest discover -s tests -t .
 ```
 
-## 产物
-
-- `blackboard/{challenge_id}/` — 每题完整档案（facts/recon/hint/progress）
-- `agent_logs/` — 各 agent 进程日志
-- `engine.log` — 引擎日志
-- `summary.md` — 跑分总结（通关数、估算得分）
-
-## 集成进镜像（P4）
-
-构建脚本 `build-claude-run.sh` 的 `[5/8]` 增加：
+## 镜像构建
 
 ```bash
-docker cp "$ROOT/scheduler_engine.py" $CNAME:/workspace/
-docker cp "$ROOT/engine"             $CNAME:/workspace/engine
-docker cp "$ROOT/agent_prompts"      $CNAME:/workspace/agent_prompts
+bash docker/build-claude-engine.sh        # pro：deepseek-v4-pro[1m]
+bash docker/build-claude-engine-flash.sh  # flash：deepseek-v4-flash[1m]
 ```
 
-启动：`python3 /workspace/scheduler_engine.py`
+构建含两道硬校验（工具链与镜像自检），产物 tar.gz 上传平台托管运行。构建前置依赖（pwnkit、skills-all）见 `docker/README.md`。
+
+## 运行产物
+
+- `blackboard/{challenge_id}/` — 每题档案（facts / recon / hint / progress）
+- `agent_logs/` — agent 进程日志
+- `queenbee.log` — 引擎日志
+- `engine_status.json` / `events.jsonl` — 监控快照与事件流
+- `summary.md` — 跑分总结
